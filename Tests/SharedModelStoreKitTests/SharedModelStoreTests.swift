@@ -14,6 +14,7 @@ final class SharedModelStoreTests: XCTestCase {
             .appendingPathComponent("smstest-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
         SharedModelStore.rootOverride = tempRoot
+        SharedModelStore.registeredPins = [:]   // isolate pin registrations per test
     }
 
     override func tearDownWithError() throws {
@@ -108,10 +109,25 @@ final class SharedModelStoreTests: XCTestCase {
         XCTAssertEqual(SharedModelStore.appGroupID, "group.com.example.test")
     }
 
-    // 7. Revision pin resolves pinned vs unpinned.
+    // 7. Revision pin resolves baseline pinned vs unpinned.
     func testRevisionPin() {
         XCTAssertEqual(SharedModelStore.revision(forRepoID: "mlx-community/gemma-4-e2b-it-4bit"),
                        "2c3e507453b4f218d05fe3cc97bea5c5a654257e")
         XCTAssertEqual(SharedModelStore.revision(forRepoID: "some/unpinned-repo"), "main")
+    }
+
+    // 8. A registered pin merges over the baseline; a re-registered identical SHA is a
+    //    harmless no-op. (The conflicting-SHA path asserts by design, so it isn't unit
+    //    tested here — asserting would crash the debug test runner.)
+    func testRegisterPinMergesAndSameSHAIsNoOp() {
+        SharedModelStore.registerPinnedRevisions(["some/new-repo": "deadbeef"])
+        XCTAssertEqual(SharedModelStore.revision(forRepoID: "some/new-repo"), "deadbeef")
+        // baseline still resolves
+        XCTAssertEqual(SharedModelStore.revision(forRepoID: "mlx-community/gemma-4-e2b-it-4bit"),
+                       "2c3e507453b4f218d05fe3cc97bea5c5a654257e")
+        // re-registering the SAME sha is fine (no conflict)
+        SharedModelStore.registerPinnedRevisions(["some/new-repo": "deadbeef"])
+        XCTAssertEqual(SharedModelStore.revision(forRepoID: "some/new-repo"), "deadbeef")
+        XCTAssertTrue(SharedModelStore.pinnedRevisions["some/new-repo"] == "deadbeef")
     }
 }

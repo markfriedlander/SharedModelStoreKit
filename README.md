@@ -86,8 +86,29 @@ if SharedModelStore.acquireDownloadLock(modelID: repoID) {
 }
 ```
 
+Pinned revisions — download a repo at a fixed commit so an upstream re-conversion can't
+break your build:
+
+```swift
+let rev = SharedModelStore.revision(forRepoID: repoID)   // pinned SHA, or "main"
+// pass `rev` to your downloader as the revision to fetch
+```
+
+The package ships a baked-in baseline of pins. To add your own (as an outside consumer,
+or to extend the set), register them at launch:
+
+```swift
+SharedModelStore.registerPinnedRevisions(["your-org/your-model": "<commit-sha>"])
+```
+
+Registrations merge over the baseline. Pinning the same repo to a *different* SHA than an
+existing pin is a conflict (it would recreate the very collision pins prevent): it asserts
+in debug, logs in release, and is refused. Every app that downloads a pinned repo must call
+`revision(forRepoID:)`, or it fetches HEAD and can collide with a pinned sibling.
+
 If the App Group is unavailable (missing entitlement, `configure` not called), the store
-degrades to per-app Caches: the app keeps working, just without cross-app sharing.
+degrades to per-app Caches: the app keeps working, just without cross-app sharing (and logs
+a one-time warning so the misconfiguration is visible).
 
 ## Testing
 

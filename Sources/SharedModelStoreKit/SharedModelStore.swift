@@ -30,6 +30,7 @@
 //      an old app can't cause a wrongful delete no matter what it strips.
 
 import Foundation
+import os
 
 // MARK: - App-Group paths & on-disk presence
 
@@ -66,7 +67,12 @@ public enum SharedModelStore {
     /// Test-only override of the store root. Internal (not part of the public
     /// contract) so tests can point every path at an isolated temp directory instead
     /// of the real App-Group container. `nil` in production. See the package tests.
-    internal static var rootOverride: URL?
+    /// `nonisolated(unsafe)` so the package stays clean if it's ever moved to the
+    /// Swift 6 language mode (both sibling CCs flagged this as the one such spot).
+    nonisolated(unsafe) internal static var rootOverride: URL?
+
+    /// One-shot guard so the "sharing is off" warning logs at most once per launch.
+    nonisolated(unsafe) private static var didWarnNoContainer = false
 
     /// Container root for shared models, under a `Models/` subfolder (part of the
     /// contract — every app must match it exactly). Fallback to per-app Caches if the
@@ -80,7 +86,23 @@ public enum SharedModelStore {
         if let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID) {
             return container.appendingPathComponent("Models", isDirectory: true)
         }
+        warnNoContainerOnce()
         return FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+    }
+
+    /// Log once (in every build, not just DEBUG) the first time the store falls back
+    /// to per-app Caches because the App Group container is unavailable — so a
+    /// forgotten/late `configure(appGroupID:)` or a missing entitlement is visible to
+    /// every adopter in the wild, not just in a debug build. Cross-app sharing is off
+    /// when this fires; the app still works.
+    private static func warnNoContainerOnce() {
+        guard !didWarnNoContainer else { return }
+        didWarnNoContainer = true
+        let reason = _appGroupID.isEmpty
+            ? "configure(appGroupID:) was not called before first use"
+            : "App Group '\(_appGroupID)' is unavailable (entitlement missing?)"
+        Logger(subsystem: "SharedModelStoreKit", category: "config")
+            .error("Cross-app model sharing is OFF: \(reason, privacy: .public). Falling back to per-app Caches.")
     }
 
     /// The HuggingFace-style cache root. What `HubApi(downloadBase:)` points at.
@@ -457,19 +479,55 @@ extension SharedModelStore {
 
 extension SharedModelStore {
 
-    // Curated models pinned to a specific HF revision (commit SHA) so an upstream
-    // re-conversion can't silently break a shipped build — and, now that this lives in
-    // the SHARED package, so no sibling can download a broken HEAD that another app
-    // then adopts. Any repo not listed tracks `main` (HEAD). Moved here from Hal's
-    // MLXModelDownloader; each app's downloader applies it via `revision(forRepoID:)`.
-    public static let pinnedRevisions: [String: String] = [
+    // Models pinned to a specific HF revision (commit SHA) so an upstream re-conversion
+    // can't silently break a shipped build — and, in the SHARED package, so no sibling
+    // downloads a bad HEAD another app then adopts. Any repo not pinned tracks `main`.
+    // Each app's downloader applies this via `revision(forRepoID:)`.
+    //
+    // Pins are a CROSS-APP AGREEMENT, not a private choice: two apps pinning the same
+    // repo to DIFFERENT revisions would recreate the collision pins exist to prevent.
+    // So the model is a baked-in BASELINE plus an optional per-app registration that
+    // merges over it, with a hard conflict check. The family relies on the baseline
+    // (zero coordination = no drift); an outside consumer registers its own.
+
+    /// Baked-in baseline pins. Every app that imports the package gets these with no
+    /// setup, which is what keeps a family in agreement automatically.
+    public static let baselinePinnedRevisions: [String: String] = [
         // gemma-4-e2b-it-4bit: last revision before the 2026-07-06 re-conversion
         // (2026-05-19) that broke loading. Full story: Hal HISTORY 2026-07-20.
         "mlx-community/gemma-4-e2b-it-4bit": "2c3e507453b4f218d05fe3cc97bea5c5a654257e"
     ]
 
+    /// Internal (not public) so tests can reset it between cases; production code only
+    /// mutates it through `registerPinnedRevisions(_:)`.
+    nonisolated(unsafe) internal static var registeredPins: [String: String] = [:]
+
+    /// Register additional pins (repoID → commit SHA), merged OVER the baseline. Call
+    /// at launch. Re-registering the SAME SHA is a harmless no-op. Registering a
+    /// DIFFERENT SHA for a repo already pinned (by the baseline or an earlier
+    /// registration) is a CONFLICT: it would recreate the cross-app collision, so it
+    /// asserts loudly in DEBUG, logs in Release, and is REFUSED (the existing pin
+    /// wins), so a mistake surfaces in development and never silently ships.
+    public static func registerPinnedRevisions(_ pins: [String: String]) {
+        for (repo, sha) in pins {
+            let existing = registeredPins[repo] ?? baselinePinnedRevisions[repo]
+            if let existing, existing != sha {
+                assertionFailure("SharedModelStore: conflicting pin for \(repo) — existing \(existing) vs registered \(sha). Pins must agree across apps.")
+                Logger(subsystem: "SharedModelStoreKit", category: "pins")
+                    .error("Refused conflicting pin for \(repo, privacy: .public): keeping \(existing, privacy: .public), ignoring \(sha, privacy: .public).")
+                continue
+            }
+            registeredPins[repo] = sha
+        }
+    }
+
+    /// The effective pin map: baseline plus any non-conflicting registrations.
+    public static var pinnedRevisions: [String: String] {
+        baselinePinnedRevisions.merging(registeredPins) { _, reg in reg }
+    }
+
     /// The HF revision to download `repoID` at: the pinned SHA if pinned, else "main".
     public static func revision(forRepoID repoID: String) -> String {
-        pinnedRevisions[repoID] ?? "main"
+        registeredPins[repoID] ?? baselinePinnedRevisions[repoID] ?? "main"
     }
 }

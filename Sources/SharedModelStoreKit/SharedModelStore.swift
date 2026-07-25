@@ -492,10 +492,24 @@ extension SharedModelStore {
 
     /// Baked-in baseline pins. Every app that imports the package gets these with no
     /// setup, which is what keeps a family in agreement automatically.
+    // The curated, supported model list — every downloadable curated model across the
+    // family (Hal / Posey / AI Camera), each LOCKED to one exact commit so nothing ever
+    // tracks a moving "main". Captured 2026-07-24. Anything NOT on this list is
+    // experimental: the family makes no guarantee it loads and does not manage its version.
     public static let baselinePinnedRevisions: [String: String] = [
-        // gemma-4-e2b-it-4bit: last revision before the 2026-07-06 re-conversion
-        // (2026-05-19) that broke loading. Full story: Hal HISTORY 2026-07-20.
-        "mlx-community/gemma-4-e2b-it-4bit": "2c3e507453b4f218d05fe3cc97bea5c5a654257e"
+        // Gemma: DELIBERATELY NOT latest — current main (238767…) is the broken
+        // 2026-07-06 re-conversion. Held at the last good commit (2026-05-19).
+        "mlx-community/gemma-4-e2b-it-4bit": "2c3e507453b4f218d05fe3cc97bea5c5a654257e",
+        // The rest: locked to their current known-good commit as of 2026-07-24.
+        "mlx-community/Qwen3.5-2B-MLX-4bit": "93760be4f1f69842a46bc13dbdc0f19e291392a3",
+        "mlx-community/Llama-3.2-3B-Instruct-4bit": "7f0dc925e0d0afb0322d96f9255cfddf2ba5636e",
+        "mlx-community/dolphin3.0-llama3.2-3B-4Bit": "cdc777b578ff86a69f1b05c9bc00df0cdc2f52d1",
+        "prism-ml/Ternary-Bonsai-8B-mlx-2bit": "9260b24298e4211e804663e9f519962cf59f34be",
+        "nomic-ai/nomic-embed-text-v1.5": "e9b6763023c676ca8431644204f50c2b100d9aab",
+        "mixedbread-ai/mxbai-embed-large-v1": "b33106f585b9ce46904ad7443a3b52b7a63e231c",
+        "stabilityai/sd-turbo": "b261bac6fd2cf515557d5d0707481eafa0485ec2",
+        // AI Camera "eye" — coming soon; locked ahead of ship (verified 2026-07-24).
+        "mlx-community/SmolVLM2-500M-Video-Instruct-mlx": "fa57db46815177fbdfd65cc85a2b3416a8332268"
     ]
 
     /// Internal (not public) so tests can reset it between cases; production code only
@@ -529,5 +543,50 @@ extension SharedModelStore {
     /// The HF revision to download `repoID` at: the pinned SHA if pinned, else "main".
     public static func revision(forRepoID repoID: String) -> String {
         registeredPins[repoID] ?? baselinePinnedRevisions[repoID] ?? "main"
+    }
+}
+
+// MARK: - Version-locked identity & adoption
+//
+// The store's paths, claims, refcount manifest, and completion sentinel all key on an
+// opaque `modelID` string. The version-safe design is simply: use the IDENTITY (repo id
+// with the resolved commit folded in) as that modelID everywhere, instead of the bare
+// repo id. Then two commits are two identities — two folders, two claims, two sentinels —
+// and an app can never confuse or silently adopt the wrong version. No core rewrite; the
+// apps just pass `requiredIdentity(forRepoID:)` where they used to pass the repo id.
+
+extension SharedModelStore {
+
+    /// Storage identity for a model: the repo id with its resolved commit folded in, so
+    /// version is part of identity everywhere the store keys on `modelID`. A legacy or
+    /// unpinned model (revision "main" or empty) keeps the bare repo id, so plain-name
+    /// copies from before this change still resolve. Pass THIS as `modelID` to every store
+    /// call — `mlxModelDir`, `claim`/`releaseClaim`, `markRepoComplete`/`isRepoComplete`,
+    /// `sizeOnDisk`, `excludeFromBackup` — and the whole store becomes version-aware.
+    public static func modelIdentity(_ repoID: String, revision: String) -> String {
+        (revision.isEmpty || revision == "main") ? repoID : "\(repoID)@\(revision)"
+    }
+
+    /// The identity an app SHOULD use for a curated repo: its LOCKED commit folded in
+    /// (from the baseline list). For an unpinned repo this is just the repo id (tracks
+    /// main, legacy behavior). This is the one call an app needs to become version-safe.
+    public static func requiredIdentity(forRepoID repoID: String) -> String {
+        modelIdentity(repoID, revision: revision(forRepoID: repoID))
+    }
+
+    /// Is the LOCKED copy of `repoID` present and verified complete? True only when the
+    /// exact required-commit identity has finished downloading. This is the adoption gate:
+    /// an app uses a copy only when THIS is true, never merely because some folder exists.
+    public static func isLockedCopyReady(forRepoID repoID: String) -> Bool {
+        isRepoComplete(requiredIdentity(forRepoID: repoID))
+    }
+
+    /// Does a legacy plain-name copy exist whose commit is UNKNOWN (downloaded before
+    /// versions were part of identity)? Only meaningful for a pinned repo, where the bare
+    /// folder is NOT the locked identity. Such a copy must be preserved but NEVER treated
+    /// as satisfying the lock: download the locked identity separately, then reap the
+    /// legacy copy once it's orphaned. Migration use.
+    public static func hasLegacyUnversionedCopy(forRepoID repoID: String) -> Bool {
+        requiredIdentity(forRepoID: repoID) != repoID && isRepoDownloaded(repoID)
     }
 }

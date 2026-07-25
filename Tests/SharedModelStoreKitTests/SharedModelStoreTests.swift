@@ -130,4 +130,37 @@ final class SharedModelStoreTests: XCTestCase {
         XCTAssertEqual(SharedModelStore.revision(forRepoID: "some/new-repo"), "deadbeef")
         XCTAssertTrue(SharedModelStore.pinnedRevisions["some/new-repo"] == "deadbeef")
     }
+
+    // 9. Identity folds the locked commit into a pinned repo's id, and leaves an
+    //    unpinned repo bare (legacy behavior).
+    func testModelIdentity() {
+        let gemma = "mlx-community/gemma-4-e2b-it-4bit"
+        XCTAssertEqual(SharedModelStore.requiredIdentity(forRepoID: gemma),
+                       "\(gemma)@2c3e507453b4f218d05fe3cc97bea5c5a654257e")
+        XCTAssertEqual(SharedModelStore.requiredIdentity(forRepoID: "some/unpinned"), "some/unpinned")
+        XCTAssertEqual(SharedModelStore.modelIdentity("a/b", revision: "main"), "a/b")
+        XCTAssertEqual(SharedModelStore.modelIdentity("a/b", revision: ""), "a/b")
+        XCTAssertEqual(SharedModelStore.modelIdentity("a/b", revision: "abc123"), "a/b@abc123")
+    }
+
+    // 10. The locked copy is "ready" only when the required-commit identity's sentinel is
+    //     present; a bare plain-name copy of a pinned repo is a legacy/unknown copy that
+    //     does NOT satisfy the lock.
+    func testLockedCopyReadyAndLegacyDetection() {
+        let gemma = "mlx-community/gemma-4-e2b-it-4bit"
+        // nothing on disk yet
+        XCTAssertFalse(SharedModelStore.isLockedCopyReady(forRepoID: gemma))
+        XCTAssertFalse(SharedModelStore.hasLegacyUnversionedCopy(forRepoID: gemma))
+        // simulate a legacy plain-name copy (unknown commit)
+        try? FileManager.default.createDirectory(at: SharedModelStore.mlxModelDir(gemma),
+                                                 withIntermediateDirectories: true)
+        FileManager.default.createFile(
+            atPath: SharedModelStore.mlxModelDir(gemma).appendingPathComponent("weights.bin").path,
+            contents: Data([0x01]))
+        XCTAssertTrue(SharedModelStore.hasLegacyUnversionedCopy(forRepoID: gemma))
+        XCTAssertFalse(SharedModelStore.isLockedCopyReady(forRepoID: gemma), "legacy copy must not satisfy the lock")
+        // now the locked identity finishes downloading
+        SharedModelStore.markRepoComplete(SharedModelStore.requiredIdentity(forRepoID: gemma))
+        XCTAssertTrue(SharedModelStore.isLockedCopyReady(forRepoID: gemma))
+    }
 }

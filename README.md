@@ -110,6 +110,30 @@ If the App Group is unavailable (missing entitlement, `configure` not called), t
 degrades to per-app Caches: the app keeps working, just without cross-app sharing (and logs
 a one-time warning so the misconfiguration is visible).
 
+## Supported models & adding one
+
+Every downloadable model the family supports is locked to one exact commit in
+`baselinePinnedRevisions` (in `SharedModelStore.swift`). Nothing tracks a moving
+`main` — that is the whole point, so an upstream re-conversion can never silently
+change or break what a shipped app runs. A model that is **not** on this list is
+*experimental*: it will still download and share, but the family makes no guarantee
+it loads and does not manage its version.
+
+**To add or share a new curated model** (do this once, for the whole family):
+
+1. Get the exact commit SHA you want (not a tag, not `main`):
+   `curl -s https://huggingface.co/api/models/<org>/<repo> | grep -o '"sha":"[^"]*"'`
+   (or a specific older commit if `main` is known-bad, as with Gemma).
+2. Add one line to `baselinePinnedRevisions`: `"<org>/<repo>": "<full-40-char-sha>"`.
+3. Rebuild and move the package reference (the tag/branch all apps point at) to the
+   new commit. Every app re-adopts on its next resolve — **no per-app dependency edit.**
+4. Because the list is baked in and shared, all apps agree on that version
+   automatically. Never pin the same repo to two different SHAs across apps — that
+   recreates the exact collision this design exists to prevent.
+
+Only one app needs a model? Add it here anyway (the others just never download it).
+Keeping the whole family's supported set in one list is what keeps versions in agreement.
+
 ## Testing
 
 The store reads/writes fixed container paths, so tests point `root` at a temp directory

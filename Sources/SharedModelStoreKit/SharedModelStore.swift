@@ -567,11 +567,28 @@ extension SharedModelStore {
         (revision.isEmpty || revision == "main") ? repoID : "\(repoID)@\(revision)"
     }
 
-    /// The identity an app SHOULD use for a curated repo: its LOCKED commit folded in
-    /// (from the baseline list). For an unpinned repo this is just the repo id (tracks
-    /// main, legacy behavior). This is the one call an app needs to become version-safe.
+    /// Curated models that stay in their PLAIN `repo` folder even though they're pinned,
+    /// because a library loads them by plain name and cannot be pointed at a `repo@<sha>`
+    /// folder: the AI Camera drawer's vendored Stable Diffusion loader, and the embedders'
+    /// external swift-embeddings loader. They still download at their locked commit (the pin
+    /// applies to the URL regardless of the folder name); they simply aren't version-stamped
+    /// on disk. This is safe because two apps sharing one of these must agree on a single
+    /// version, which this one curated list already guarantees, so a stamped folder would buy
+    /// nothing. Keeping the rule HERE, in the package, rather than per app, is what stops the
+    /// identity-vs-plain drift.
+    public static let plainFolderRepos: Set<String> = [
+        "stabilityai/sd-turbo",                // AI Camera drawer (vendored StableDiffusion)
+        "nomic-ai/nomic-embed-text-v1.5",      // embedder (external swift-embeddings)
+        "mixedbread-ai/mxbai-embed-large-v1"   // embedder (external swift-embeddings)
+    ]
+
+    /// The identity an app SHOULD use for a curated repo: its LOCKED commit folded in as
+    /// `repo@<sha>`. Two cases return the bare repo id instead: an unpinned repo (tracks main,
+    /// legacy behavior), and a `plainFolderRepos` model (stored under its plain name because a
+    /// library loads it that way). This is the one call an app needs to become version-safe.
     public static func requiredIdentity(forRepoID repoID: String) -> String {
-        modelIdentity(repoID, revision: revision(forRepoID: repoID))
+        if plainFolderRepos.contains(repoID) { return repoID }
+        return modelIdentity(repoID, revision: revision(forRepoID: repoID))
     }
 
     /// Is the LOCKED copy of `repoID` present and verified complete? True only when the

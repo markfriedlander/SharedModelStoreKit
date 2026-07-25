@@ -143,6 +143,26 @@ final class SharedModelStoreTests: XCTestCase {
         XCTAssertEqual(SharedModelStore.modelIdentity("a/b", revision: "abc123"), "a/b@abc123")
     }
 
+    // 9b. Plain-folder models (a library loads them by plain name) keep their BARE id from
+    //     requiredIdentity even though they are pinned, so they file under their plain folder.
+    //     The pin still applies to the download URL; a normal pinned repo still folds its commit.
+    func testPlainFolderReposStayBare() {
+        let sdTurbo = "stabilityai/sd-turbo"
+        let nomic = "nomic-ai/nomic-embed-text-v1.5"
+        // They ARE pinned (the pin still governs which commit is downloaded) ...
+        XCTAssertNotEqual(SharedModelStore.revision(forRepoID: sdTurbo), "main")
+        XCTAssertNotEqual(SharedModelStore.revision(forRepoID: nomic), "main")
+        // ... but their storage identity stays the plain repo id (no @sha folder).
+        XCTAssertEqual(SharedModelStore.requiredIdentity(forRepoID: sdTurbo), sdTurbo)
+        XCTAssertEqual(SharedModelStore.requiredIdentity(forRepoID: nomic), nomic)
+        // So there is no stamped-vs-legacy split for them.
+        XCTAssertFalse(SharedModelStore.hasLegacyUnversionedCopy(forRepoID: sdTurbo))
+        // A normal pinned repo still stamps its commit.
+        let gemma = "mlx-community/gemma-4-e2b-it-4bit"
+        XCTAssertEqual(SharedModelStore.requiredIdentity(forRepoID: gemma),
+                       "\(gemma)@2c3e507453b4f218d05fe3cc97bea5c5a654257e")
+    }
+
     // 10. The locked copy is "ready" only when the required-commit identity's sentinel is
     //     present; a bare plain-name copy of a pinned repo is a legacy/unknown copy that
     //     does NOT satisfy the lock.

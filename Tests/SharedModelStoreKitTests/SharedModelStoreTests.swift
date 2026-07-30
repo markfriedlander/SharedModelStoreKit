@@ -183,4 +183,100 @@ final class SharedModelStoreTests: XCTestCase {
         SharedModelStore.markRepoComplete(SharedModelStore.requiredIdentity(forRepoID: gemma))
         XCTAssertTrue(SharedModelStore.isLockedCopyReady(forRepoID: gemma))
     }
+
+    // MARK: - active launch maintenance (dead-app cleanup)
+
+    /// Plant a non-empty model dir on disk so isRepoDownloaded == true.
+    private func plantModelFile(_ repoID: String) throws {
+        let dir = SharedModelStore.mlxModelDir(repoID)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: dir.appendingPathComponent("weights.bin").path,
+                                       contents: Data([0x01]))
+    }
+
+    /// Read the raw manifest.json back as a dictionary (heartbeats/models are private).
+    private func rawManifest() throws -> [String: Any] {
+        let url = tempRoot.appendingPathComponent("manifest.json")
+        let data = try Data(contentsOf: url)
+        return (try JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+    }
+
+    // reapStaleClaims: a model claimed ONLY by a stale app has its files deleted and its
+    // entry removed; a model with a fresh, or a missing-heartbeat, claimant is untouched.
+    func testReapDeletesStaleOnlyModelAndKeepsOthers() throws {
+        let hbStale = now() - 40 * day
+        let hbFresh = now() - 1 * day
+        try writeManifest("""
+        {"version":1,"models":{
+          "org/dead":{"claimedBy":["ghost"]},
+          "org/live":{"claimedBy":["liveApp"]},
+          "org/unknown":{"claimedBy":["nohbApp"]}},
+         "heartbeats":{"ghost":\(hbStale),"liveApp":\(hbFresh)}}
+        """)
+        try plantModelFile("org/dead")
+        try plantModelFile("org/live")
+        try plantModelFile("org/unknown")
+
+        let deleted = SharedModelStore.reapStaleClaims()
+
+        XCTAssertEqual(deleted, ["org/dead"], "only the stale-only model is reaped")
+        XCTAssertFalse(SharedModelStore.isRepoDownloaded("org/dead"), "dead model files removed")
+        XCTAssertTrue(SharedModelStore.isRepoDownloaded("org/live"), "live model kept")
+        XCTAssertTrue(SharedModelStore.isRepoDownloaded("org/unknown"),
+                      "missing-heartbeat model kept, grace handles it, not the reap")
+    }
+
+    // reapStaleClaims must NOT reap a model with a live co-claimant; it just drops the stale one.
+    func testReapKeepsModelWithLiveCoClaimant() throws {
+        let hbStale = now() - 40 * day
+        let hbFresh = now() - 1 * day
+        try writeManifest("""
+        {"version":1,"models":{"org/repoX":{"claimedBy":["ghost","liveApp"]}},
+         "heartbeats":{"ghost":\(hbStale),"liveApp":\(hbFresh)}}
+        """)
+        try plantModelFile("org/repoX")
+        let deleted = SharedModelStore.reapStaleClaims()
+        XCTAssertTrue(deleted.isEmpty, "a live co-claimant keeps the model")
+        XCTAssertTrue(SharedModelStore.isRepoDownloaded("org/repoX"))
+        XCTAssertEqual(SharedModelStore.claimants(modelID: "org/repoX"), ["liveApp"],
+                       "stale co-claimant dropped")
+    }
+
+    // graceStampMissingHeartbeats stamps a heartbeat-less claimant so it's no longer immortal.
+    func testGraceStampWritesHeartbeatForMissing() throws {
+        try writeManifest(#"""
+        {"version":1,"models":{"org/repoX":{"claimedBy":["nohbApp"]}}}
+        """#)
+        SharedModelStore.graceStampMissingHeartbeats()
+        let hb = try rawManifest()["heartbeats"] as? [String: Any] ?? [:]
+        XCTAssertNotNil(hb["nohbApp"], "grace-stamp gives the pre-lease claimant a heartbeat")
+        if let stamp = (hb["nohbApp"] as? NSNumber)?.doubleValue {
+            XCTAssertEqual(stamp, now(), accuracy: 5, "stamped ~now")
+        }
+        // Freshly stamped ⇒ still live, so an immediate reap must NOT drop it.
+        try plantModelFile("org/repoX")
+        XCTAssertTrue(SharedModelStore.reapStaleClaims().isEmpty,
+                      "a freshly grace-stamped claim survives the reap")
+    }
+
+    // clearEntireSharedStore deletes ALL model files AND empties the manifest (no ghosts).
+    func testClearEntireSharedStoreWipesFilesAndManifest() throws {
+        try writeManifest("""
+        {"version":1,"models":{
+          "org/a":{"claimedBy":["appA"]},
+          "org/b":{"claimedBy":["appB"]}},
+         "heartbeats":{"appA":\(now()),"appB":\(now())}}
+        """)
+        try plantModelFile("org/a")
+        try plantModelFile("org/b")
+
+        let count = SharedModelStore.clearEntireSharedStore()
+
+        XCTAssertEqual(count, 2, "reports both repos removed")
+        XCTAssertFalse(SharedModelStore.isRepoDownloaded("org/a"))
+        XCTAssertFalse(SharedModelStore.isRepoDownloaded("org/b"))
+        let manifest = try rawManifest()
+        XCTAssertEqual((manifest["models"] as? [String: Any])?.count, 0, "manifest models emptied")
+        XCTAssertEqual((manifest["heartbeats"] as? [String: Any])?.count, 0, "heartbeats emptied")
+    }
 }

@@ -277,6 +277,98 @@ extension SharedModelStore {
             .sorted()
     }
 
+    // MARK: active launch maintenance (dead-app cleanup)
+    //
+    // `releaseClaim` only reaps stale claimants *incidentally*, for the one model being
+    // released. That never reclaims a DELETED app's models, since a dead app calls
+    // nothing. These two functions, called once at launch by every app, make the lease
+    // actively enforced: whichever sibling launches does the cleanup. Order matters:
+    //   touchHeartbeat()  →  graceStampMissingHeartbeats()  →  reapStaleClaims()
+    // so THIS app is fresh, unknowns get a fair window, and only provably-dead claims go.
+
+    /// Give every heartbeat-less claim a fresh lease window. A claim made before the
+    /// lease system existed has no heartbeat, and `isClaimantLive` treats "unknown" as
+    /// live forever (the conservative rollout rule), so such claims are immortal and pin
+    /// files even for a long-deleted app. Stamping them `now` converts them to normal
+    /// lease-tracked claims: a still-installed owner keeps re-stamping on its own launches
+    /// and stays alive; a deleted owner never does, so its window expires in one lease and
+    /// `reapStaleClaims` reclaims it. Self-limiting: once stamped a claim is no longer
+    /// "missing", so it is never grace-stamped again. Call at launch, BEFORE the reap.
+    public static func graceStampMissingHeartbeats() {
+        mutateManifest { m in
+            var hb = m.heartbeats ?? [:]
+            let now = nowEpoch()
+            var changed = false
+            for entry in m.models.values {
+                for appID in entry.claimedBy where hb[appID] == nil {
+                    hb[appID] = now
+                    changed = true
+                }
+            }
+            if changed { m.heartbeats = hb }
+        }
+    }
+
+    /// Active sweep: drop every claimant whose heartbeat is provably stale (present AND
+    /// older than the lease), and DELETE the files of any model left with no claimant.
+    /// This is what actually reclaims a deleted app's disk. Safe by construction: a
+    /// claimant is dropped only on positive evidence of death; heartbeat-less claims are
+    /// NOT reaped here (they're handled by `graceStampMissingHeartbeats`, which should run
+    /// first). Files are removed AFTER the coordinated manifest write, so the manifest
+    /// never describes files mid-deletion (the inverse of the 2026-07-15 ghost bug). Only
+    /// ever removes a model dir the store owns; never conversation or memory data. Returns
+    /// the repo ids whose files were deleted, for logging/diagnostics.
+    @discardableResult
+    public static func reapStaleClaims() -> [String] {
+        var abandoned: [String] = []
+        mutateManifest { m in
+            let hb = m.heartbeats
+            for (modelID, var entry) in m.models {
+                let before = entry.claimedBy.count
+                entry.claimedBy.removeAll { !isClaimantLive($0, hb) }
+                if entry.claimedBy.isEmpty {
+                    m.models.removeValue(forKey: modelID)
+                    abandoned.append(modelID)
+                } else if entry.claimedBy.count != before {
+                    m.models[modelID] = entry
+                }
+            }
+        }
+        let fm = FileManager.default
+        var deleted: [String] = []
+        for repoID in abandoned {
+            if (try? fm.removeItem(at: mlxModelDir(repoID))) != nil {
+                deleted.append(repoID)
+            }
+        }
+        return deleted
+    }
+
+    /// LAST-RESORT: remove EVERY downloaded model file in the shared container and reset
+    /// the manifest (claims + heartbeats) to empty, in one coordinated write. Backs the
+    /// user-invoked "Clear all family models" button, the deliberate, confirmed counterpart
+    /// to the accidental 2026-07-15 wipe. The point is that it resets the MANIFEST too, so
+    /// afterward no app reasons from a manifest describing files that are gone (the ghost
+    /// bug); every app simply sees an empty store and re-downloads on demand. Never touches
+    /// conversation or memory data (those live in each app's own container). Returns the
+    /// number of model repos removed.
+    @discardableResult
+    public static func clearEntireSharedStore() -> Int {
+        let fm = FileManager.default
+        let modelsDir = huggingFaceRoot.appendingPathComponent("models", isDirectory: true)
+        let count = installedRepos().count
+        mutateManifest { m in
+            m.models = [:]
+            m.heartbeats = [:]
+            if let orgs = try? fm.contentsOfDirectory(atPath: modelsDir.path) {
+                for org in orgs where !org.hasPrefix(".") {
+                    try? fm.removeItem(at: modelsDir.appendingPathComponent(org, isDirectory: true))
+                }
+            }
+        }
+        return count
+    }
+
     /// Stamp THIS app's heartbeat without touching any claim. Call once on launch (or
     /// any time the app becomes active) so a busy app that isn't downloading still
     /// proves it's alive and keeps its existing claims from being reaped.

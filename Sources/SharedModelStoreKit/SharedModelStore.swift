@@ -473,6 +473,51 @@ extension SharedModelStore {
     }
 
     /// Current lock record for `modelID`, or nil if free. Does not consider staleness.
+    // MARK: replace a damaged copy (the family's rule, not one app's exception)
+
+    /// REPLACE A MODEL'S FILES IN PLACE: remove the shared copy and fetch it again, with the rest of
+    /// the family held off while it happens.
+    ///
+    /// WHY THIS LIVES HERE (Mark Friedlander, 2026-09-17). Hal learned the hard way that a damaged
+    /// model cannot be repaired by the obvious route: `releaseClaim` KEEPS the files whenever a
+    /// sibling app still claims the model, which is right for a delete and useless for a repair, and
+    /// every downloader skips a file already on disk. So Hal removed the directory itself. That
+    /// worked, and leaving it there was wrong: it is an exception to the family's claim rule that the
+    /// other apps cannot see. His words: "there exceptions to how the apps all interact that at this
+    /// 2 of the apps are completely unaware of. And that would defeat the purpose of sharing a
+    /// package to oversee the shared files."
+    ///
+    /// WHAT IT GUARANTEES, and why an app must not do this by hand:
+    ///   - It takes the DOWNLOAD LOCK first, so a sibling that wants this model waits and adopts the
+    ///     new copy instead of racing a half-removed one. An app removing the directory itself skips
+    ///     this and leaves that window open (measured in Hal, 2026-09-17: 45 to 95 seconds).
+    ///   - CLAIMS ARE LEFT ALONE. A claim protects a WORKING model from a neighbour's delete. This is
+    ///     a replacement, not a delete: every claimant still wants this model and every claimant is
+    ///     served by the new copy, because they all read the same one. Refusing to repair a shared
+    ///     file would leave the whole family on the damaged copy, which is the worse outcome.
+    ///   - The completeness sentinel goes with the directory, so an app asking `isRepoComplete`
+    ///     during the gap is told the truth rather than handed a partial model.
+    ///
+    /// Returns `false` WITHOUT touching anything when another app holds a fresh download lock: that
+    /// app is working on this model right now, and the caller should wait rather than fight it.
+    ///
+    /// `refetch` is the caller's own download, run while the lock is held, because the store owns the
+    /// files and each app owns its downloader. The lock is released afterwards whether that succeeds
+    /// or throws, so a failed repair leaves no lock behind; the files stay absent in that case, which
+    /// every app reads correctly as "not downloaded".
+    @discardableResult
+    public static func replace(modelID: String, refetch: () async throws -> Void) async rethrows -> Bool {
+        guard acquireDownloadLock(modelID: modelID) else { return false }
+        defer { releaseDownloadLock(modelID: modelID) }
+
+        let dir = mlxModelDir(modelID)
+        if FileManager.default.fileExists(atPath: dir.path) {
+            try? FileManager.default.removeItem(at: dir)
+        }
+        try await refetch()
+        return true
+    }
+
     public static func downloadLock(modelID: String) -> (holder: String, since: Double)? {
         guard let l = readDownloadLocks(NSFileCoordinator()).locks[modelID] else { return nil }
         return (l.holder, l.since)

@@ -279,4 +279,21 @@ final class SharedModelStoreTests: XCTestCase {
         XCTAssertEqual((manifest["models"] as? [String: Any])?.count, 0, "manifest models emptied")
         XCTAssertEqual((manifest["heartbeats"] as? [String: Any])?.count, 0, "heartbeats emptied")
     }
+
+    // The one "keep out of the device backup" routine: sets the mark on any file, clears it
+    // on request, and leaves a path that does not exist alone.
+    func testExcludeFromBackupSetsClearsAndSkipsMissing() throws {
+        let file = tempRoot.appendingPathComponent("some-app-file.sqlite")
+        try Data("x".utf8).write(to: file)
+        func mark() throws -> Bool? {
+            try file.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup
+        }
+        XCTAssertTrue(try SharedModelStore.excludeFromBackup(file))
+        XCTAssertEqual(try mark(), true, "mark set")
+        XCTAssertTrue(try SharedModelStore.excludeFromBackup(file, excluded: false))
+        XCTAssertEqual(try mark(), false, "mark cleared")
+        let missing = tempRoot.appendingPathComponent("not-there-yet")
+        XCTAssertFalse(try SharedModelStore.excludeFromBackup(missing), "missing path is left alone")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: missing.path), "nothing was created")
+    }
 }

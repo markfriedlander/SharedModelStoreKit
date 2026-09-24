@@ -184,11 +184,24 @@ public enum SharedModelStore {
     /// (unlike Caches, they ARE backed up by default → multi-GB quota burn, App
     /// Review 2.5.1). Idempotent.
     public static func excludeFromBackup(_ modelID: String) {
-        var dir = mlxModelDir(modelID)
-        guard FileManager.default.fileExists(atPath: dir.path) else { return }
+        _ = try? excludeFromBackup(mlxModelDir(modelID))
+    }
+
+    /// Set (or, with `excluded: false`, clear) the "leave this out of the device's own
+    /// backup" mark on ANY file or folder, not only a model's. THE ONE ROUTINE FOR THIS IN
+    /// THE FAMILY (2026-09-23): Hal and AI Camera had each written their own copy of these
+    /// lines for their own files, beside the model version above, and copies drift. The mark
+    /// lives on the file, so a path that does not exist yet cannot carry it: returns false
+    /// and does nothing. Returns true when the mark was set as asked; throws when the system
+    /// refuses, so the caller can say why in its own log.
+    @discardableResult
+    public static func excludeFromBackup(_ url: URL, excluded: Bool = true) throws -> Bool {
+        var url = url
+        guard FileManager.default.fileExists(atPath: url.path) else { return false }
         var values = URLResourceValues()
-        values.isExcludedFromBackup = true
-        try? dir.setResourceValues(values)
+        values.isExcludedFromBackup = excluded
+        try url.setResourceValues(values)
+        return true
     }
 }
 

@@ -67,6 +67,14 @@ SharedModelStore.claim(modelID: repoID, repo: repoID, sizeBytes: bytes)
 SharedModelStore.excludeFromBackup(repoID)   // App Groups ARE iCloud-backed by default
 ```
 
+For an app's OWN files or folders (its database, its exports), the same mark through the same
+routine, so no app keeps a private copy of it (1.3.0). It returns false for a path that does not
+exist yet, throws if the system refuses, and `excluded: false` takes the mark off again:
+
+```swift
+try SharedModelStore.excludeFromBackup(databaseURL)
+```
+
 On delete — only remove files when it's safe:
 
 ```swift

@@ -117,16 +117,20 @@ public enum SharedModelStore {
             .appendingPathComponent(modelID, isDirectory: true)
     }
 
-    /// "Is this repo present on disk?" — a non-empty repo directory. Truth-on-disk,
-    /// independent of which app fetched it. A partial (mid-download) dir reads present,
-    /// so callers that care also consult the downloader's in-flight state.
+    /// "Are there model files on disk for this repo?" — finished OR NOT. Truth-on-disk,
+    /// independent of which app fetched it. A partial (mid-download, or cut off by a kill)
+    /// dir reads present. Right for cleanup, sizes and migration (anything on disk); WRONG
+    /// for "can a person choose it / can it load": that question is `isRepoReady` (1.4.0).
+    /// Dot-entries (the store's own markers) are not model files and are not counted
+    /// (1.4.0: a folder holding only `.download-in-progress` is not "downloaded").
     public static func isRepoDownloaded(_ repo: String) -> Bool {
         let contents = (try? FileManager.default.contentsOfDirectory(atPath: mlxModelDir(repo).path)) ?? []
-        return !contents.isEmpty
+        return contents.contains { !$0.hasPrefix(".") }
     }
 
-    /// Every repo id currently present on disk (org/name pairs with non-empty dirs).
-    /// Skips dot-entries. Used by UI that lists installed models.
+    /// Every repo id with model files on disk (org/name pairs with non-empty dirs), FINISHED OR
+    /// NOT: right for cleanup and storage totals. To show what a person can choose, filter it with
+    /// `isRepoReady` (1.4.0). Skips dot-entries.
     public static func installedRepos() -> [String] {
         let base = huggingFaceRoot.appendingPathComponent("models", isDirectory: true)
         let fm = FileManager.default
@@ -172,12 +176,63 @@ public enum SharedModelStore {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let sentinel = dir.appendingPathComponent(completeSentinelName)
         FileManager.default.createFile(atPath: sentinel.path, contents: Data())
+        // Finished, so it is no longer "begun, not finished" (1.4.0).
+        try? FileManager.default.removeItem(at: dir.appendingPathComponent(inProgressMarkerName))
     }
 
     /// Whether a model's download actually COMPLETED (sentinel present).
     public static func isRepoComplete(_ repo: String) -> Bool {
         let sentinel = mlxModelDir(repo).appendingPathComponent(completeSentinelName)
         return FileManager.default.fileExists(atPath: sentinel.path)
+    }
+
+    // MARK: unfinished-download marker, and the one "is it ready" answer (1.4.0)
+    //
+    // WHY (2026-11-13, found by AI Camera's CC on Mark's Mac, fixed here at Mark's request:
+    // "please fix the shared code"). `isRepoDownloaded` answers "are there files?", so a download
+    // cut off by a kill or a lost network left a folder that EVERY app read as installed: AI
+    // Camera offered "Select" on a 2.4 GB model holding 0.17 GB, and choosing it would have
+    // broken every shot. Hal 4 hit the same thing in September ("a model read as downloaded at
+    // 4.6 percent", its item 53) and fixed it inside Hal 4 only, with a private in-flight record.
+    // That rule now lives here, so all four apps ask one question and get one answer, and the
+    // in-flight record is a file in the model's own folder: it survives a restart and every app
+    // can see it, whichever app started the download.
+
+    /// Name of the marker a downloader writes into a model's folder when it STARTS, and that
+    /// `markRepoComplete` removes when it finishes. Its presence means "begun, not finished".
+    public static let inProgressMarkerName = ".download-in-progress"
+
+    /// Call when a download of `repo` STARTS, before the first file lands. `markRepoComplete`
+    /// clears it on success; on cancel or failure leave it (the folder is unfinished) or remove
+    /// the folder. Idempotent.
+    public static func markDownloadStarted(_ repo: String) {
+        let dir = mlxModelDir(repo)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: dir.appendingPathComponent(inProgressMarkerName).path,
+                                       contents: Data())
+    }
+
+    /// True when some app began downloading `repo` and has not finished it (the marker is there).
+    public static func isDownloadUnfinished(_ repo: String) -> Bool {
+        FileManager.default.fileExists(atPath: mlxModelDir(repo).appendingPathComponent(inProgressMarkerName).path)
+    }
+
+    /// THE ANSWER TO "IS THIS MODEL READY TO USE?" Use it wherever a person is offered the model
+    /// (Select, a picker, "installed") and before loading it. Hal 4's rule (item 53), shared:
+    ///   1. The finished sentinel is there: READY, whoever fetched it.
+    ///   2. No model files: NOT ready.
+    ///   3. Files, no sentinel, and an unfinished-download marker: NOT ready (cut off).
+    ///   4. Files, no sentinel, and a fresh download lock (some app is fetching it now): NOT ready.
+    ///   5. Files, no sentinel, nothing in flight: READY. A copy from before sentinels existed,
+    ///      or one a sibling fetched without writing one. Loadable, so it is not taken away.
+    public static func isRepoReady(_ repo: String) -> Bool {
+        if isRepoComplete(repo) { return true }
+        guard isRepoDownloaded(repo) else { return false }
+        if isDownloadUnfinished(repo) { return false }
+        if let lock = downloadLock(modelID: repo), nowEpoch() - lock.since < downloadLockStaleSeconds {
+            return false
+        }
+        return true
     }
 
     /// Exclude a model dir from iCloud backup. MANDATORY for App-Group containers

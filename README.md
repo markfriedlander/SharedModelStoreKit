@@ -57,12 +57,25 @@ Where you store models:
 
 ```swift
 let dir = SharedModelStore.mlxModelDir("mlx-community/some-model")   // where to download
-if SharedModelStore.isRepoDownloaded("mlx-community/some-model") { /* already present */ }
+if SharedModelStore.isRepoReady("mlx-community/some-model") { /* finished: offer it, load it */ }
+```
+
+`isRepoReady` (1.4.0) is THE check for "can a person choose this model / can it load". It is true
+for a finished download (the sentinel is there, whoever fetched it) and for an older copy with no
+markers at all, and false for a download that was cut off or is under way in any app.
+`isRepoDownloaded` only says "there are model files on disk, finished or not": right for cleanup,
+sizes and migration, wrong for offering a model (a partial download reads true).
+
+When a download STARTS, before the first file lands (1.4.0):
+
+```swift
+SharedModelStore.markDownloadStarted(repoID)   // "begun, not finished", visible to every app
 ```
 
 On a completed download (and when adopting a model a sibling already fetched):
 
 ```swift
+SharedModelStore.markRepoComplete(repoID)    // the finished sentinel; also clears the start marker
 SharedModelStore.claim(modelID: repoID, repo: repoID, sizeBytes: bytes)
 SharedModelStore.excludeFromBackup(repoID)   // App Groups ARE iCloud-backed by default
 ```

@@ -184,6 +184,42 @@ final class SharedModelStoreTests: XCTestCase {
         XCTAssertTrue(SharedModelStore.isLockedCopyReady(forRepoID: gemma))
     }
 
+    // 1.4.0: isRepoReady is the one answer to "can a person choose it / can it load".
+    // The case that motivated it: a download cut off by a kill left a partial folder every app
+    // read as installed (AI Camera on Mark's Mac, 2026-11-13; Hal 4 item 53 before that).
+    func testReadyNeedsAFinishedOrLegacyCopyAndNothingInFlight() throws {
+        let repo = "stabilityai/sd-turbo"
+        let dir = SharedModelStore.mlxModelDir(repo)
+        // 2. nothing on disk
+        XCTAssertFalse(SharedModelStore.isRepoReady(repo))
+        // a download starts: only the marker is there, which is not a model file
+        SharedModelStore.markDownloadStarted(repo)
+        XCTAssertTrue(SharedModelStore.isDownloadUnfinished(repo))
+        XCTAssertFalse(SharedModelStore.isRepoDownloaded(repo), "the store's own marker is not a model file")
+        XCTAssertFalse(SharedModelStore.isRepoReady(repo))
+        // 3. some files land, then the app is killed: files on disk, marker still there
+        FileManager.default.createFile(atPath: dir.appendingPathComponent("unet.safetensors").path, contents: Data([1]))
+        XCTAssertTrue(SharedModelStore.isRepoDownloaded(repo), "files are on disk")
+        XCTAssertFalse(SharedModelStore.isRepoReady(repo), "a cut-off download must not read ready")
+        // 1. the download finishes: sentinel written, marker cleared
+        SharedModelStore.markRepoComplete(repo)
+        XCTAssertFalse(SharedModelStore.isDownloadUnfinished(repo))
+        XCTAssertTrue(SharedModelStore.isRepoReady(repo))
+    }
+
+    func testLegacyCopyWithoutMarkersStaysReadyUnlessSomeoneIsFetchingIt() throws {
+        let repo = "mlx-community/legacy-model"
+        try plantModelFile(repo)          // 5. files, no sentinel, no marker: from before markers
+        XCTAssertTrue(SharedModelStore.isRepoReady(repo), "a loadable legacy copy is not taken away")
+        // 4. another app holds a fresh download lock on it: not ready while it is being fetched
+        SharedModelStore.debugPlantForeignLock(modelID: repo, holder: "com.example.sibling", ageSeconds: 5)
+        XCTAssertFalse(SharedModelStore.isRepoReady(repo))
+        // a stale lock (its holder died long ago) no longer blocks it
+        SharedModelStore.debugPlantForeignLock(modelID: repo, holder: "com.example.sibling",
+                                               ageSeconds: SharedModelStore.downloadLockStaleSeconds + 60)
+        XCTAssertTrue(SharedModelStore.isRepoReady(repo))
+    }
+
     // MARK: - active launch maintenance (dead-app cleanup)
 
     /// Plant a non-empty model dir on disk so isRepoDownloaded == true.

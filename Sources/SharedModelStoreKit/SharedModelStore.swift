@@ -170,14 +170,29 @@ public enum SharedModelStore {
     // make already-downloaded models re-read as incomplete. Shared now, legacy name.
     public static let completeSentinelName = ".hal-download-complete"
 
-    /// Mark a model VERIFIED COMPLETE (call only from the success finalizer).
-    public static func markRepoComplete(_ repo: String) {
+    /// Mark a model VERIFIED COMPLETE (call only from the success finalizer, or when adopting a copy a
+    /// sibling fetched).
+    ///
+    /// 1.5.0: when the download that filled this folder declared its files (`markDownloadStarted(_:expecting:)`),
+    /// the store checks them itself and REFUSES to write the sentinel while any is missing or the wrong size,
+    /// returning false and leaving the folder "begun, not finished". So no downloader, in any app, can call a
+    /// model finished too early. A folder with no declared list is marked as before (returns true).
+    @discardableResult
+    public static func markRepoComplete(_ repo: String) -> Bool {
         let dir = mlxModelDir(repo)
+        let problems = problemFiles(repo)
+        if !problems.isEmpty {
+            let summary = problems.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }.joined(separator: "; ")
+            Logger(subsystem: "SharedModelStoreKit", category: "complete")
+                .error("Refused to mark \(repo, privacy: .public) finished: \(problems.count) file(s) not whole. \(summary, privacy: .public)")
+            return false
+        }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let sentinel = dir.appendingPathComponent(completeSentinelName)
         FileManager.default.createFile(atPath: sentinel.path, contents: Data())
         // Finished, so it is no longer "begun, not finished" (1.4.0).
         try? FileManager.default.removeItem(at: dir.appendingPathComponent(inProgressMarkerName))
+        return true
     }
 
     /// Whether a model's download actually COMPLETED (sentinel present).
@@ -205,11 +220,76 @@ public enum SharedModelStore {
     /// Call when a download of `repo` STARTS, before the first file lands. `markRepoComplete`
     /// clears it on success; on cancel or failure leave it (the folder is unfinished) or remove
     /// the folder. Idempotent.
+    ///
+    /// 1.5.0: this form declares no file list, so it also REMOVES any list an earlier download left in the
+    /// folder (a new download with an unknown file set is starting; an old list must not judge it).
     public static func markDownloadStarted(_ repo: String) {
         let dir = mlxModelDir(repo)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? FileManager.default.removeItem(at: dir.appendingPathComponent(expectedFilesName))
         FileManager.default.createFile(atPath: dir.appendingPathComponent(inProgressMarkerName).path,
                                        contents: Data())
+    }
+
+    // MARK: the declared file list: "finished" means every file whole (1.5.0)
+    //
+    // WHY (2026-11-14, found by an independent review of AI Camera, moved here at Mark's request: "maybe
+    // we should do it and then just have Hal adopt it next"). 1.4.0's marker made a cut-off copy read as
+    // not ready, but each app's downloader still decided for itself when a model was finished, and AI
+    // Camera's (a copy of Hal's) could decide too early: after a relaunch mid-download the first file to
+    // land read as "nothing left", and nothing checked sizes, so an error page could be saved as weights,
+    // marked finished, and shared with every app. Each app has its own copy of the downloader, and copies
+    // drift. So the rule lives here: a downloader declares what the folder must hold, in the folder (it
+    // survives a relaunch and every app can read it), and `markRepoComplete` checks it. A finished copy
+    // that later loses or damages a file reads NOT ready, so no app loads a broken model.
+
+    /// Name of the file, in a model's folder, listing what the download must contain:
+    /// a JSON object of relative path -> expected bytes (0 or less = size unknown, must just be non-empty).
+    public static let expectedFilesName = ".expected-files.json"
+
+    /// Call when a download of `repo` STARTS, before the first file lands, with every file it will fetch and
+    /// its size from the hub (Hugging Face's tree API: `lfs.size` for large files, else `size`; 0 if unknown).
+    /// Writes the "begun, not finished" marker and the list. Idempotent; a later call replaces the list.
+    public static func markDownloadStarted(_ repo: String, expecting files: [String: Int64]) {
+        let dir = mlxModelDir(repo)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        if let data = try? JSONEncoder().encode(files) {
+            try? data.write(to: dir.appendingPathComponent(expectedFilesName), options: .atomic)
+        }
+        FileManager.default.createFile(atPath: dir.appendingPathComponent(inProgressMarkerName).path,
+                                       contents: Data())
+    }
+
+    /// The files the download that filled this folder declared, with their expected sizes, or nil when it
+    /// declared none (an older downloader, or a copy from before 1.5.0).
+    public static func expectedFiles(_ repo: String) -> [String: Int64]? {
+        let url = mlxModelDir(repo).appendingPathComponent(expectedFilesName)
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode([String: Int64].self, from: data)
+    }
+
+    /// Is this one declared file on disk whole: at its expected size when known, else simply not empty?
+    public static func isFileWhole(_ repo: String, file: String, expectedBytes: Int64) -> Bool {
+        let path = mlxModelDir(repo).appendingPathComponent(file).path
+        guard let size = (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? NSNumber)?.int64Value
+        else { return false }
+        return expectedBytes > 0 ? size == expectedBytes : size > 0
+    }
+
+    /// Every declared file that is not whole on disk, with why ("missing", or "N bytes, expected M").
+    /// Empty when all are whole, or when no list was declared.
+    public static func problemFiles(_ repo: String) -> [String: String] {
+        guard let files = expectedFiles(repo) else { return [:] }
+        var problems: [String: String] = [:]
+        for (name, expected) in files where !isFileWhole(repo, file: name, expectedBytes: expected) {
+            let path = mlxModelDir(repo).appendingPathComponent(name).path
+            if let size = (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? NSNumber)?.int64Value {
+                problems[name] = expected > 0 ? "\(size) bytes, expected \(expected)" : "empty"
+            } else {
+                problems[name] = "missing"
+            }
+        }
+        return problems
     }
 
     /// True when some app began downloading `repo` and has not finished it (the marker is there).
@@ -225,7 +305,11 @@ public enum SharedModelStore {
     ///   4. Files, no sentinel, and a fresh download lock (some app is fetching it now): NOT ready.
     ///   5. Files, no sentinel, nothing in flight: READY. A copy from before sentinels existed,
     ///      or one a sibling fetched without writing one. Loadable, so it is not taken away.
+    /// 1.5.0: before any of that, a folder whose download declared its files is NOT ready while any of them
+    /// is missing or the wrong size, sentinel or not (a finished copy that lost or damaged a file would only
+    /// fail later, inside a model loader). A few file-size reads; no list, no cost.
     public static func isRepoReady(_ repo: String) -> Bool {
+        if !problemFiles(repo).isEmpty { return false }
         if isRepoComplete(repo) { return true }
         guard isRepoDownloaded(repo) else { return false }
         if isDownloadUnfinished(repo) { return false }

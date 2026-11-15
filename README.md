@@ -66,16 +66,28 @@ markers at all, and false for a download that was cut off or is under way in any
 `isRepoDownloaded` only says "there are model files on disk, finished or not": right for cleanup,
 sizes and migration, wrong for offering a model (a partial download reads true).
 
-When a download STARTS, before the first file lands (1.4.0):
+When a download STARTS, before the first file lands (1.5.0), declare every file and its size from the
+hub (Hugging Face's tree API: `lfs.size` for large files, else `size`; 0 when unknown):
 
 ```swift
-SharedModelStore.markDownloadStarted(repoID)   // "begun, not finished", visible to every app
+SharedModelStore.markDownloadStarted(repoID, expecting: ["config.json": 1234, "model.safetensors": 1_234_567_890])
 ```
+
+That writes the "begun, not finished" marker and the list, into the model's own folder, so it survives a
+relaunch and every app can read it. From then on the store itself decides "finished":
+`markRepoComplete` refuses (returns false, logs which files) while any declared file is missing or the
+wrong size, and `isRepoReady` is false for such a folder even after it was finished, so no app loads a
+broken model. `expectedFiles(repoID)` reads the list back (to rebuild what is still to come after a
+relaunch), and `problemFiles(repoID)` names what is missing and why.
+
+The 1.4.0 form, `markDownloadStarted(repoID)`, still works and declares nothing; it also removes a list an
+earlier download left, so an old list never judges a download with a different file set. Adopt the 1.5.0
+form: without a list, the store can only trust the downloader.
 
 On a completed download (and when adopting a model a sibling already fetched):
 
 ```swift
-SharedModelStore.markRepoComplete(repoID)    // the finished sentinel; also clears the start marker
+SharedModelStore.markRepoComplete(repoID)    // the finished sentinel (refused if a declared file isn't whole); clears the start marker
 SharedModelStore.claim(modelID: repoID, repo: repoID, sizeBytes: bytes)
 SharedModelStore.excludeFromBackup(repoID)   // App Groups ARE iCloud-backed by default
 ```

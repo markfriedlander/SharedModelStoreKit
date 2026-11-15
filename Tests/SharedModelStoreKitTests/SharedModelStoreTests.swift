@@ -220,6 +220,57 @@ final class SharedModelStoreTests: XCTestCase {
         XCTAssertTrue(SharedModelStore.isRepoReady(repo))
     }
 
+    // 1.5.0: a declared file list makes "finished" mean every file whole, checked by the store itself.
+    // The case that motivated it: AI Camera's downloader (a copy of Hal's) wrote the sentinel after a
+    // relaunch when only the first of several files had landed (independent review, 2026-11-14).
+    func testCompleteIsRefusedUntilEveryDeclaredFileIsWhole() throws {
+        let repo = "mlx-community/declared-model"
+        let dir = SharedModelStore.mlxModelDir(repo)
+        SharedModelStore.markDownloadStarted(repo, expecting: ["config.json": 3, "model.safetensors": 5, "tokenizer.json": 0])
+        XCTAssertEqual(SharedModelStore.expectedFiles(repo)?.count, 3)
+        XCTAssertEqual(SharedModelStore.problemFiles(repo).count, 3)
+        // the first file lands; the downloader wrongly believes it is done
+        FileManager.default.createFile(atPath: dir.appendingPathComponent("config.json").path, contents: Data([1, 2, 3]))
+        XCTAssertFalse(SharedModelStore.markRepoComplete(repo), "two files are still missing")
+        XCTAssertFalse(SharedModelStore.isRepoComplete(repo))
+        XCTAssertTrue(SharedModelStore.isDownloadUnfinished(repo), "the folder stays begun, not finished")
+        XCTAssertFalse(SharedModelStore.isRepoReady(repo))
+        // an error page saved in place of the weights: the wrong size
+        FileManager.default.createFile(atPath: dir.appendingPathComponent("model.safetensors").path, contents: Data([9]))
+        FileManager.default.createFile(atPath: dir.appendingPathComponent("tokenizer.json").path, contents: Data([7]))
+        XCTAssertEqual(SharedModelStore.problemFiles(repo), ["model.safetensors": "1 bytes, expected 5"])
+        XCTAssertFalse(SharedModelStore.markRepoComplete(repo))
+        // the real weights arrive: whole, so finished
+        FileManager.default.createFile(atPath: dir.appendingPathComponent("model.safetensors").path, contents: Data([1, 2, 3, 4, 5]))
+        XCTAssertTrue(SharedModelStore.markRepoComplete(repo))
+        XCTAssertTrue(SharedModelStore.isRepoReady(repo))
+        // later a file goes missing from the finished copy: not ready, so no app loads a broken model
+        try FileManager.default.removeItem(at: dir.appendingPathComponent("tokenizer.json"))
+        XCTAssertTrue(SharedModelStore.isRepoComplete(repo), "the sentinel is still there")
+        XCTAssertFalse(SharedModelStore.isRepoReady(repo))
+        XCTAssertEqual(SharedModelStore.problemFiles(repo), ["tokenizer.json": "missing"])
+    }
+
+    // An app on an older downloader starts the same folder with no list: the old list must not judge
+    // its file set (which may differ), so the plain start removes it and completion works as in 1.4.0.
+    func testPlainStartDropsAStaleListAndCompletesAsBefore() throws {
+        let repo = "mlx-community/shared-folder"
+        SharedModelStore.markDownloadStarted(repo, expecting: ["only-in-the-first-apps-list.bin": 10])
+        SharedModelStore.markDownloadStarted(repo)
+        XCTAssertNil(SharedModelStore.expectedFiles(repo))
+        try plantModelFile(repo)
+        XCTAssertTrue(SharedModelStore.markRepoComplete(repo))
+        XCTAssertTrue(SharedModelStore.isRepoReady(repo))
+    }
+
+    // The list is a dot-file: not a model file, so it never makes an empty folder read "downloaded".
+    func testDeclaredListAloneIsNotAModel() {
+        let repo = "mlx-community/list-only"
+        SharedModelStore.markDownloadStarted(repo, expecting: ["a.bin": 1])
+        XCTAssertFalse(SharedModelStore.isRepoDownloaded(repo))
+        XCTAssertTrue(SharedModelStore.installedRepos().isEmpty)
+    }
+
     // MARK: - active launch maintenance (dead-app cleanup)
 
     /// Plant a non-empty model dir on disk so isRepoDownloaded == true.

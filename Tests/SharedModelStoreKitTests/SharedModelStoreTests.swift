@@ -383,4 +383,82 @@ final class SharedModelStoreTests: XCTestCase {
         XCTAssertFalse(try SharedModelStore.excludeFromBackup(missing), "missing path is left alone")
         XCTAssertFalse(FileManager.default.fileExists(atPath: missing.path), "nothing was created")
     }
+
+    // 1.6.0: releasing ANOTHER app's claim (an app that is gone and can never release its own).
+    func testReleaseOfAnotherAppsClaimKeepsOthersAndFiles() throws {
+        let me = SharedModelStore.thisAppID
+        let hbFresh = now() - 1 * day
+        try writeManifest("""
+        {"version":1,"models":{"org/repoZ":{"claimedBy":["\(me)","goneApp"],"repo":"org/repoZ"}},
+         "heartbeats":{"goneApp":\(hbFresh)}}
+        """)
+        let dir = SharedModelStore.mlxModelDir("org/repoZ")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data("w".utf8).write(to: dir.appendingPathComponent("weights.bin"))
+        let none = SharedModelStore.releaseClaim(ofApp: "goneApp", modelID: "org/repoZ")
+        XCTAssertFalse(none, "this app still claims it")
+        XCTAssertEqual(SharedModelStore.claimants(modelID: "org/repoZ"), [me])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dir.appendingPathComponent("weights.bin").path),
+                      "the store never deletes files on a release")
+    }
+
+    func testReleaseOfTheLastClaimReportsSafeAndDeletesNothing() throws {
+        let hbFresh = now() - 1 * day
+        try writeManifest("""
+        {"version":1,"models":{"org/repoZ":{"claimedBy":["goneApp"]}},
+         "heartbeats":{"goneApp":\(hbFresh)}}
+        """)
+        let dir = SharedModelStore.mlxModelDir("org/repoZ")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data("w".utf8).write(to: dir.appendingPathComponent("weights.bin"))
+        XCTAssertTrue(SharedModelStore.releaseClaim(ofApp: "goneApp", modelID: "org/repoZ"))
+        XCTAssertTrue(SharedModelStore.claimants(modelID: "org/repoZ").isEmpty, "the entry is gone")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dir.appendingPathComponent("weights.bin").path),
+                      "files stay until the caller deletes them")
+    }
+
+    func testReleaseOfAnUnknownAppChangesNothing() throws {
+        let hbFresh = now() - 1 * day
+        try writeManifest("""
+        {"version":1,"models":{"org/repoZ":{"claimedBy":["liveApp"]}},
+         "heartbeats":{"liveApp":\(hbFresh)}}
+        """)
+        XCTAssertFalse(SharedModelStore.releaseClaim(ofApp: "neverClaimed", modelID: "org/repoZ"),
+                       "a live claim remains, so not safe")
+        XCTAssertEqual(SharedModelStore.claimants(modelID: "org/repoZ"), ["liveApp"])
+        XCTAssertTrue(SharedModelStore.releaseClaim(ofApp: "neverClaimed", modelID: "org/unknownModel"),
+                      "a model nobody claims has no live claim")
+    }
+
+    func testReleaseOfAnotherAppAlsoReapsStaleClaimants() throws {
+        let hbStale = now() - 40 * day
+        let hbFresh = now() - 1 * day
+        try writeManifest("""
+        {"version":1,"models":{"org/repoZ":{"claimedBy":["goneApp","stale"]}},
+         "heartbeats":{"goneApp":\(hbFresh),"stale":\(hbStale)}}
+        """)
+        XCTAssertTrue(SharedModelStore.releaseClaim(ofApp: "goneApp", modelID: "org/repoZ"))
+    }
+
+    func testReleasingOwnClaimByNameIsTheSameAsReleaseClaim() throws {
+        SharedModelStore.claim(modelID: "org/repoY", repo: "org/repoY")
+        XCTAssertTrue(SharedModelStore.releaseClaim(ofApp: SharedModelStore.thisAppID, modelID: "org/repoY"))
+        XCTAssertTrue(SharedModelStore.claimants(modelID: "org/repoY").isEmpty)
+    }
+
+    /// Parallel releases of different apps' claims all land: the coordinated write loses none.
+    func testConcurrentReleasesOfDifferentAppsAllLand() throws {
+        let hbFresh = now() - 1 * day
+        let apps = (0..<12).map { "app\($0)" }
+        let list = apps.map { "\"\($0)\"" }.joined(separator: ",")
+        let beats = apps.map { "\"\($0)\":\(hbFresh)" }.joined(separator: ",")
+        try writeManifest("""
+        {"version":1,"models":{"org/repoZ":{"claimedBy":[\(list),"keeper"]}},
+         "heartbeats":{\(beats),"keeper":\(hbFresh)}}
+        """)
+        DispatchQueue.concurrentPerform(iterations: apps.count) { i in
+            SharedModelStore.releaseClaim(ofApp: apps[i], modelID: "org/repoZ")
+        }
+        XCTAssertEqual(SharedModelStore.claimants(modelID: "org/repoZ"), ["keeper"])
+    }
 }

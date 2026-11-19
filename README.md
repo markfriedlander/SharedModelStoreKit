@@ -108,6 +108,19 @@ if SharedModelStore.releaseClaim(modelID: repoID) {
 }
 ```
 
+To release ANOTHER app's claim (1.6.0), for an app that is no longer on the device and so can never
+release its own, the same write with the same answer (`true` iff no live claim remains; the store
+never deletes files, you do, only on `true`, and after telling the person):
+
+```swift
+if SharedModelStore.releaseClaim(ofApp: "com.example.GoneApp", modelID: repoID) {
+    try? FileManager.default.removeItem(at: SharedModelStore.mlxModelDir(repoID))
+}
+```
+
+`releaseClaim(modelID:)` is now exactly `releaseClaim(ofApp: thisAppID, modelID:)`. Never edit
+`manifest.json` yourself: this call is the one supported way.
+
 Download lock (optional but recommended when two apps might fetch the same repo):
 
 ```swift
@@ -166,6 +179,12 @@ it loads and does not manage its version.
 
 Only one app needs a model? Add it here anyway (the others just never download it).
 Keeping the whole family's supported set in one list is what keeps versions in agreement.
+
+## Version notes
+
+- **1.6.0** (additive): `releaseClaim(ofApp:modelID:)`, releasing another app's claim; `releaseClaim(modelID:)` delegates to it.
+- 1.5.0: declared file list (`markDownloadStarted(_:expecting:)`, `problemFiles`, `expectedFiles`).
+- 1.4.0: `isRepoReady`, `markDownloadStarted`.
 
 ## Testing
 

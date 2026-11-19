@@ -393,11 +393,24 @@ extension SharedModelStore {
     /// than the lease) is reaped here (the immortal-claim fix).
     @discardableResult
     public static func releaseClaim(modelID: String) -> Bool {
+        releaseClaim(ofApp: thisAppID, modelID: modelID)
+    }
+
+    /// 1.6.0: release the claim of the app `appID` (normally ANOTHER app, one that is no longer on the device and so
+    /// can never release its own) on `modelID`. The same coordinated manifest write, the same stale-claimant reaping
+    /// and the same answer as `releaseClaim(modelID:)`: `true` iff NO app still *live*ly claims the model afterwards,
+    /// i.e. its files are now no one's. Like `releaseClaim`, it never deletes files; the caller deletes only on `true`
+    /// (and should say so to the person first: `claimants(modelID:)` before the call tells who else holds it). An
+    /// `appID` that holds no claim changes nothing (this app's heartbeat is still stamped) and the answer is still
+    /// whether any live claim remains. Releasing a live app's claim is the caller's decision: the next time that app
+    /// launches and uses the model it claims it again.
+    @discardableResult
+    public static func releaseClaim(ofApp appID: String, modelID: String) -> Bool {
         var safeToDelete = false
         mutateManifest { m in
             stampHeartbeat(&m)   // we're alive right now
             guard var e = m.models[modelID] else { safeToDelete = true; return }
-            e.claimedBy.removeAll { $0 == thisAppID }
+            e.claimedBy.removeAll { $0 == appID }
             // Reap provably-dead claimants (stale heartbeat). Missing heartbeat is
             // NOT reaped — see the conservative rule in `isClaimantLive`.
             e.claimedBy.removeAll { !isClaimantLive($0, m.heartbeats) }

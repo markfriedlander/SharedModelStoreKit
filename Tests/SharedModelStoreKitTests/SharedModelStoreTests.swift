@@ -446,6 +446,42 @@ final class SharedModelStoreTests: XCTestCase {
         XCTAssertTrue(SharedModelStore.claimants(modelID: "org/repoY").isEmpty)
     }
 
+    // A download in flight (another app's fresh lock, no claim yet) makes "safe to delete" false;
+    // a stale lock and this app's own lock do not.
+    func testAnotherAppsFreshDownloadLockMakesReleaseUnsafe() throws {
+        let hbFresh = now() - 1 * day
+        try writeManifest("""
+        {"version":1,"models":{"org/repoZ":{"claimedBy":["posey"]}},
+         "heartbeats":{"posey":\(hbFresh)}}
+        """)
+        SharedModelStore.debugPlantForeignLock(modelID: "org/repoZ", holder: "thomas", ageSeconds: 30)
+        XCTAssertFalse(SharedModelStore.releaseClaim(ofApp: "posey", modelID: "org/repoZ"),
+                       "the last claim is gone but another app is downloading: do not delete")
+        XCTAssertTrue(SharedModelStore.claimants(modelID: "org/repoZ").isEmpty, "the claim itself is released")
+        XCTAssertFalse(SharedModelStore.releaseClaim(ofApp: "nobody", modelID: "org/repoZ"),
+                       "a model with no claim at all, being downloaded, is not safe either")
+
+        SharedModelStore.debugClearAllDownloadLocks()
+        SharedModelStore.debugPlantForeignLock(modelID: "org/repoZ", holder: "thomas",
+                                               ageSeconds: SharedModelStore.downloadLockStaleSeconds + 5)
+        XCTAssertTrue(SharedModelStore.releaseClaim(ofApp: "nobody", modelID: "org/repoZ"), "stale lock: unaffected")
+
+        SharedModelStore.debugClearAllDownloadLocks()
+        XCTAssertTrue(SharedModelStore.acquireDownloadLock(modelID: "org/repoZ"))
+        XCTAssertTrue(SharedModelStore.releaseClaim(ofApp: "nobody", modelID: "org/repoZ"),
+                      "this app's own lock: the caller knows its own download")
+    }
+
+    func testLastSeenReadsTheHeartbeat() throws {
+        let seen = now() - 41 * day
+        try writeManifest("""
+        {"version":1,"models":{},"heartbeats":{"posey":\(seen)}}
+        """)
+        let date = try XCTUnwrap(SharedModelStore.lastSeen(appID: "posey"))
+        XCTAssertEqual(date.timeIntervalSince1970, seen, accuracy: 0.001)
+        XCTAssertNil(SharedModelStore.lastSeen(appID: "never"))
+    }
+
     /// Parallel releases of different apps' claims all land: the coordinated write loses none.
     func testConcurrentReleasesOfDifferentAppsAllLand() throws {
         let hbFresh = now() - 1 * day

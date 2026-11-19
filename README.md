@@ -118,7 +118,7 @@ if SharedModelStore.releaseClaim(ofApp: "com.example.GoneApp", modelID: repoID) 
 }
 ```
 
-`releaseClaim(modelID:)` is now exactly `releaseClaim(ofApp: thisAppID, modelID:)`. Never edit
+`releaseClaim(modelID:)` is now exactly `releaseClaim(ofApp: thisAppID, modelID:)`. Show the person `lastSeen(appID:)` before releasing a claim: a live app's claim can be pulled from under it. Never edit
 `manifest.json` yourself: this call is the one supported way.
 
 Download lock (optional but recommended when two apps might fetch the same repo):
@@ -182,7 +182,7 @@ Keeping the whole family's supported set in one list is what keeps versions in a
 
 ## Version notes
 
-- **1.6.0** (additive): `releaseClaim(ofApp:modelID:)`, releasing another app's claim; `releaseClaim(modelID:)` delegates to it.
+- **1.6.0** (additive): `releaseClaim(ofApp:modelID:)`, releasing another app's claim (`releaseClaim(modelID:)` delegates to it); the answer is `false` while ANOTHER app holds a fresh download lock on the model (a download in flight has no claim yet); `lastSeen(appID:) -> Date?` for "last opened N days ago". Review by the Thomas agent.
 - 1.5.0: declared file list (`markDownloadStarted(_:expecting:)`, `problemFiles`, `expectedFiles`).
 - 1.4.0: `isRepoReady`, `markDownloadStarted`.
 

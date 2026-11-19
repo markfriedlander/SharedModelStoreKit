@@ -404,8 +404,20 @@ extension SharedModelStore {
     /// `appID` that holds no claim changes nothing (this app's heartbeat is still stamped) and the answer is still
     /// whether any live claim remains. Releasing a live app's claim is the caller's decision: the next time that app
     /// launches and uses the model it claims it again.
+    ///
+    /// WARNING: releasing the claim of an app that is STILL INSTALLED can pull the files out from under it (when its
+    /// claim was the last one and the caller then deletes). This function cannot tell a deleted app from one not opened
+    /// lately; the caller must let the person judge, showing `lastSeen(appID:)` ("last opened 41 days ago").
+    ///
+    /// DOWNLOADS IN FLIGHT: an app claims a model only when its download finishes, so an app that is fetching the model
+    /// right now holds the download lock and no claim. When ANOTHER app holds a fresh download lock on `modelID` the
+    /// answer is `false` (not safe to delete) however the claims stand, so a caller never deletes files under a
+    /// download. This app's own lock does not count: the caller is this app and knows what it is doing with it (for
+    /// `releaseClaim(modelID:)` that is Delete, which the app's own downloader cancels first); a stale lock does not
+    /// count either, the same 10-minute rule `acquireDownloadLock` uses. The claim itself is released either way.
     @discardableResult
     public static func releaseClaim(ofApp appID: String, modelID: String) -> Bool {
+        let fetchedElsewhere = isFetchedByAnotherApp(modelID)
         var safeToDelete = false
         mutateManifest { m in
             stampHeartbeat(&m)   // we're alive right now
@@ -421,7 +433,21 @@ extension SharedModelStore {
                 m.models[modelID] = e
             }
         }
-        return safeToDelete
+        return safeToDelete && !fetchedElsewhere
+    }
+
+    /// True while ANOTHER app holds a fresh (not stale) download lock on `modelID`: it is fetching the model right now
+    /// and has no claim yet. Read-only; the one reading of the lock for this question.
+    private static func isFetchedByAnotherApp(_ modelID: String) -> Bool {
+        guard let lock = downloadLock(modelID: modelID) else { return false }
+        return lock.holder != thisAppID && (nowEpoch() - lock.since) < downloadLockStaleSeconds
+    }
+
+    /// Read-only: when `appID` last launched or touched the store (its heartbeat), or nil when the store has no record
+    /// (an older claim before heartbeats existed). For "Posey, last opened 41 days ago" beside a release choice. Reads
+    /// the same heartbeats the lease and the reaping use.
+    public static func lastSeen(appID: String) -> Date? {
+        readManifest(NSFileCoordinator()).heartbeats?[appID].map { Date(timeIntervalSince1970: $0) }
     }
 
     /// Read-only: which apps *live*ly claim `modelID` (stale ones filtered out). Used

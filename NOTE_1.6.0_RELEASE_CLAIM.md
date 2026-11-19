@@ -42,7 +42,11 @@ public static func releaseClaim(ofApp appID: String, modelID: String) -> Bool
    `acquireDownloadLock` uses), whatever the claims say, also for a model with no claim at all. The claim is still
    released. A stale lock changes nothing. **This app's own lock changes nothing**: the caller is that app and knows its
    own download (for `releaseClaim(modelID:)` that is Delete, where the app's downloader cancels first), and refusing
-   would make an app unable to delete a model it is itself downloading.
+   would make an app unable to delete a model it is itself downloading. **One limit** (the Thomas agent's note): the lock
+   counts as fresh only while the downloader refreshes it, so a download that runs on in the background with its app
+   suspended can pass the 10-minute stale rule without a refresh, and the answer can then say `true` mid-download. That is
+   the same rule `acquireDownloadLock` already lives with; the window is narrow (a long suspended download AND a person
+   releasing a gone app's claim on that same model at that moment), and `lastSeen` gives the person a second look.
 2. **`public static func lastSeen(appID: String) -> Date?`**: the app's heartbeat as a date, nil when the store has no
    record. For "Posey, last opened 41 days ago". The doc comment of `releaseClaim(ofApp:)` now says that releasing a LIVE
    app's claim can pull files out from under it, so the caller must let the person judge, showing that date.
